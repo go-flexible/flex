@@ -45,7 +45,11 @@ func Start(ctx context.Context, workers ...Worker) error {
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, os.Kill, syscall.SIGTERM)
 	defer cancel()
 
-	var errC = make(chan error, len(workers)*2)
+	var (
+		errC     = make(chan error, len(workers))
+		runErrC  = make(chan error, len(workers))
+		haltErrC = make(chan error, len(workers))
+	)
 
 	for _, worker := range workers {
 		if worker == nil {
@@ -54,7 +58,7 @@ func Start(ctx context.Context, workers ...Worker) error {
 
 		go func(worker Worker) {
 			if err := worker.Run(ctx); err != nil {
-				errC <- err
+				runErrC <- err
 				cancel()
 			}
 		}(worker)
@@ -63,6 +67,14 @@ func Start(ctx context.Context, workers ...Worker) error {
 loop:
 	for {
 		select {
+		case err, ok := <-haltErrC:
+			if ok {
+				errC <- err
+			}
+		case err, ok := <-runErrC:
+			if ok {
+				errC <- err
+			}
 		case <-ctx.Done():
 			var wg sync.WaitGroup
 			wg.Add(len(workers))
@@ -70,18 +82,20 @@ loop:
 			for _, worker := range workers {
 				go func(worker Worker) {
 					defer wg.Done()
-					errC <- worker.Halt(ctx)
+					err := worker.Halt(ctx)
+					haltErrC <- err
 				}(worker)
 			}
 
 			wg.Wait()
-			close(errC)
 
 			break loop
 		}
 	}
 
-	if err := NewMultiErrorFromChan(errC); err.Valid() {
+	close(errC)
+
+	if err := newMultiErrorFromChan(errC); err.Valid() {
 		return err
 	}
 
@@ -90,7 +104,7 @@ loop:
 
 type MultiError struct{ Errors []error }
 
-func NewMultiErrorFromChan(errC chan error) MultiError {
+func newMultiErrorFromChan(errC chan error) MultiError {
 	var errors []error
 	for err := range errC {
 		if err != nil {
