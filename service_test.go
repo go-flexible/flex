@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/go-flexible/flex"
 )
 
@@ -112,7 +111,6 @@ func TestStart(t *testing.T) {
 		}
 
 		err := flex.Start(ctx, workers...)
-		spew.Dump(err)
 		if err == nil {
 			t.Error("expected an error but did not get one")
 		}
