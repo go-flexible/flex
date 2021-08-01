@@ -7,9 +7,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 )
+
+var logger = log.New(os.Stderr, "flex: ", 0)
 
 // Runner represents the behaviour for running a service worker.
 type Runner interface {
@@ -29,14 +32,14 @@ type Worker interface {
 	Halter
 }
 
-var logger = log.New(os.Stderr, "flex: ", 0)
-
+// MustStart is like Start, but panics if there is an error.
 func MustStart(ctx context.Context, workers ...Worker) {
 	if err := Start(ctx, workers...); err != nil {
 		logger.Fatal(err)
 	}
 }
 
+// Start is a blocking operation that will start processing the workers.
 func Start(ctx context.Context, workers ...Worker) error {
 	if len(workers) < 1 {
 		return errors.New("need at least 1 worker")
@@ -102,8 +105,10 @@ loop:
 	return nil
 }
 
+// MultiError holds a slice of errors and implements the error interface.
 type MultiError struct{ Errors []error }
 
+// newMultiErrorFromChan creates a new MultiError from a channel of errors.
 func newMultiErrorFromChan(errC chan error) MultiError {
 	var errors []error
 	for err := range errC {
@@ -114,8 +119,10 @@ func newMultiErrorFromChan(errC chan error) MultiError {
 	return MultiError{Errors: errors}
 }
 
+// Valid returns true if the MultiError Errors slice is not empty.
 func (e MultiError) Valid() bool { return len(e.Errors) > 0 }
 
+// Error returns a string representation of the MultiError.
 func (e MultiError) Error() string {
 	switch len(e.Errors) {
 	case 0:
@@ -125,4 +132,28 @@ func (e MultiError) Error() string {
 	default:
 		return fmt.Sprintf("there are more than one errors, first error: %v", e.Errors[0].Error())
 	}
+}
+
+// Unwrap returns an error from Error (or nil if there are no errors).
+// This error returned will further support Unwrap to get the next error,
+// etc. The order will match the order of Errors in the multierror.Error
+// at the time of calling.
+func (e MultiError) Unwrap() error {
+	// no errors, move along.
+	if len(e.Errors) == 0 {
+		return nil
+	}
+
+	// 1 error, return it directly.
+	if len(e.Errors) == 1 {
+		return e.Errors[0]
+	}
+
+	// many errors, return a formatted chain.
+	var errChain []string
+	for _, err := range e.Errors {
+		errChain = append(errChain, err.Error())
+	}
+
+	return fmt.Errorf("multiple errors: %v", strings.Join(errChain, "; next => "))
 }

@@ -3,11 +3,14 @@ package flex_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-flexible/flex"
 )
+
+const unnamed = "un-named"
 
 type mockWorker struct {
 	name string
@@ -16,14 +19,14 @@ type mockWorker struct {
 
 func (m *mockWorker) Run(context.Context) error {
 	if m.name == "" {
-		m.name = "un-named"
+		m.name = unnamed
 	}
 	m.t.Logf("mock worker (%s) running", m.name)
 	return nil
 }
 func (m *mockWorker) Halt(context.Context) error {
 	if m.name == "" {
-		m.name = "un-named"
+		m.name = unnamed
 	}
 	m.t.Logf("mock worker (%s) halting", m.name)
 	return nil
@@ -33,7 +36,7 @@ type failingMockWorker struct{ mockWorker }
 
 func (f *failingMockWorker) Run(context.Context) error {
 	if f.name == "" {
-		f.name = "un-named"
+		f.name = unnamed
 	}
 	f.t.Logf("mock worker (%s) failing to run", f.name)
 	return errors.New("run failed")
@@ -138,6 +141,47 @@ func TestStart(t *testing.T) {
 
 		if _, ok := err.(flex.MultiError); !ok {
 			t.Errorf("expected an error of type %T, but got: %T", flex.MultiError{}, err)
+		}
+	})
+}
+
+func TestMultiError(t *testing.T) {
+	t.Run("nil must not panic", func(t *testing.T) {
+		t.Parallel()
+
+		defer func() {
+			if r := recover(); r != nil {
+				t.Error("TestMultiError must not panic")
+			}
+		}()
+
+		err := flex.MultiError{}
+		_ = err.Error()
+	})
+	t.Run("one error must contain the error", func(t *testing.T) {
+		t.Parallel()
+
+		errs := []error{
+			errors.New("foo"),
+		}
+
+		err := flex.MultiError{errs}
+		if err.Error() != errs[0].Error() {
+			t.Errorf("expected %q but got %q", errs[0].Error(), err.Error())
+		}
+	})
+	t.Run("multiple errors must display first error", func(t *testing.T) {
+		t.Parallel()
+
+		errs := []error{
+			errors.New("foo"),
+			errors.New("bar"),
+			errors.New("baz"),
+		}
+
+		err := flex.MultiError{errs}
+		if !strings.Contains(err.Error(), errs[0].Error()) {
+			t.Errorf("expected error to contain %q, but got %q", errs[0].Error(), err.Error())
 		}
 	})
 }
