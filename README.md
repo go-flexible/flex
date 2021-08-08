@@ -1,4 +1,6 @@
 # flex
+ 
+[![Go](https://github.com/go-flexible/flex/actions/workflows/go.yml/badge.svg?branch=develop)](https://github.com/go-flexible/flex/actions/workflows/go.yml)
 
 A collection of packages for building Go services.
 
