@@ -1,6 +1,12 @@
 # flex
- 
-[![Go](https://github.com/go-flexible/flex/actions/workflows/go.yml/badge.svg?branch=develop)](https://github.com/go-flexible/flex/actions/workflows/go.yml)
+
+<p align="center">
+        <img src="docs/iana-lettering.svg" width="300px"/>
+        <br>
+        <a href="https://github.com/go-flexible/flex/actions/workflows/go.yml">
+                <img src="https://github.com/go-flexible/flex/actions/workflows/go.yml/badge.svg?branch=develop">
+        </a>
+</p>
 
 A collection of packages for building Go services.
 
