@@ -1,0 +1,12 @@
+linters:
+  enable:
+    - revive 
+    - ifshort 
+    - gocritic 
+    - dogsled 
+    - gosec 
+    - misspell 
+    - goconst 
+    - goconst 
+    - noctx 
+    - godot
