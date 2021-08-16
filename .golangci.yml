@@ -10,3 +10,6 @@ linters:
     - goconst 
     - noctx 
     - godot
+    - goimports
+    - nakedret
+    - exportloopref
