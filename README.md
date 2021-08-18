@@ -6,6 +6,7 @@
         <a href="https://github.com/go-flexible/flex/actions/workflows/go.yml">
                 <img src="https://github.com/go-flexible/flex/actions/workflows/go.yml/badge.svg?branch=develop">
         </a>
+        <a href="https://pkg.go.dev/github.com/go-flexible/flex"><img src="https://pkg.go.dev/badge/github.com/go-flexible/flex.svg" alt="Go Reference"></a>
 </p>
 
 A collection of packages for building Go services.
