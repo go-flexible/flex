@@ -1,23 +1,25 @@
-name: Lint
-
+name: golangci-lint
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
+      - master
   pull_request:
-    branches: [main, develop]
-  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
-  lint:
+  golangci:
+    name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version-file: "./go.mod"
-          cache: false
+          go-version: stable
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
-          args: --timeout=5m --out-format=colored-line-number --issues-exit-code 0 --new-from-rev=main
+          version: v2.1
