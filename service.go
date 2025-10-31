@@ -3,16 +3,20 @@ package flex
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 var logger = log.New(os.Stderr, "flex: ", 0)
+
+// DefaultHaltTimeout is the default timeout for graceful shutdown of workers.
+// This provides workers with a grace period to close connections, flush data,
+// and clean up resources during the halt phase.
+const DefaultHaltTimeout = 30 * time.Second
 
 // Runner represents the behaviour for running a service worker.
 type Runner interface {
@@ -40,6 +44,16 @@ func MustStart(ctx context.Context, workers ...Worker) {
 }
 
 // Start is a blocking operation that will start processing the workers.
+//
+// Workers are started concurrently and run until one of the following occurs:
+// 1. A worker returns an error from Run()
+// 2. A signal (SIGINT, SIGKILL, SIGTERM) is received
+// 3. The provided context is canceled
+//
+// When shutdown is triggered, all workers' Halt() methods are called concurrently
+// with a fresh context that has DefaultHaltTimeout as its deadline. This ensures
+// workers have a grace period to perform graceful shutdown operations such as
+// closing connections or flushing data.
 func Start(ctx context.Context, workers ...Worker) error {
 	if len(workers) < 1 {
 		return errors.New("need at least 1 worker")
@@ -79,13 +93,22 @@ loop:
 				errC <- err
 			}
 		case <-ctx.Done():
+			// Create a fresh context for halt operations with its own timeout.
+			// This ensures workers have a grace period to shutdown gracefully,
+			// even if they were interrupted by a signal or another worker failure.
+			haltCtx, haltCancel := context.WithTimeout(
+				context.Background(),
+				DefaultHaltTimeout,
+			)
+			defer haltCancel()
+
 			var wg sync.WaitGroup
 			wg.Add(len(workers))
 
 			for _, worker := range workers {
 				go func(worker Worker) {
 					defer wg.Done()
-					err := worker.Halt(ctx)
+					err := worker.Halt(haltCtx)
 					haltErrC <- err
 				}(worker)
 			}
@@ -98,62 +121,16 @@ loop:
 
 	close(errC)
 
-	if err := newMultiErrorFromChan(errC); err.Valid() {
-		return err
+	var errs []error
+	for err := range errC {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	return nil
-}
-
-// MultiError holds a slice of errors and implements the error interface.
-type MultiError struct{ Errors []error }
-
-// newMultiErrorFromChan creates a new MultiError from a channel of errors.
-func newMultiErrorFromChan(errC chan error) MultiError {
-	var errors []error
-	for err := range errC {
-		if err != nil {
-			errors = append(errors, err)
-		}
-	}
-	return MultiError{Errors: errors}
-}
-
-// Valid returns true if the MultiError Errors slice is not empty.
-func (e MultiError) Valid() bool { return len(e.Errors) > 0 }
-
-// Error returns a string representation of the MultiError.
-func (e MultiError) Error() string {
-	switch len(e.Errors) {
-	case 0:
-		return "there are no errors"
-	case 1:
-		return e.Errors[0].Error()
-	default:
-		return fmt.Sprintf("there are more than one errors, first error: %v", e.Errors[0].Error())
-	}
-}
-
-// Unwrap returns an error from Error (or nil if there are no errors).
-// This error returned will further support Unwrap to get the next error,
-// etc. The order will match the order of Errors in the multierror.Error
-// at the time of calling.
-func (e MultiError) Unwrap() error {
-	// no errors, move along.
-	if len(e.Errors) == 0 {
-		return nil
-	}
-
-	// 1 error, return it directly.
-	if len(e.Errors) == 1 {
-		return e.Errors[0]
-	}
-
-	// many errors, return a formatted chain.
-	var errChain []string
-	for _, err := range e.Errors {
-		errChain = append(errChain, err.Error())
-	}
-
-	return fmt.Errorf("multiple errors: %v", strings.Join(errChain, "; next => "))
 }
