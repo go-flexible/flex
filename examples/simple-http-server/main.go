@@ -11,7 +11,7 @@ import (
 
 func main() {
 	router := http.NewServeMux()
-	router.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/", func(rw http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(rw, "hello, world\n")
 	})
 

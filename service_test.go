@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/go-flexible/flex"
@@ -20,6 +21,13 @@ type customError struct {
 func (c customError) Error() string {
 	return c.message
 }
+
+// Sentinel errors used by regression tests to verify specific errors
+// are collected and returned by Start() via errors.Join.
+var (
+	errSentinelRun  = errors.New("sentinel: run failed")
+	errSentinelHalt = errors.New("sentinel: halt failed")
+)
 
 type mockWorker struct {
 	name string
@@ -199,7 +207,7 @@ type contextAwareWorker struct {
 	contextValid *bool
 }
 
-func (w *contextAwareWorker) Run(ctx context.Context) error {
+func (w *contextAwareWorker) Run(_ context.Context) error {
 	return errors.New("immediate failure to trigger halt")
 }
 
@@ -216,7 +224,7 @@ type deadlineAwareWorker struct {
 	deadline *time.Time
 }
 
-func (w *deadlineAwareWorker) Run(ctx context.Context) error {
+func (w *deadlineAwareWorker) Run(_ context.Context) error {
 	return errors.New("immediate failure to trigger halt")
 }
 
@@ -233,11 +241,11 @@ type slowHaltWorker struct {
 	endTime   *time.Time
 }
 
-func (w *slowHaltWorker) Run(ctx context.Context) error {
+func (w *slowHaltWorker) Run(_ context.Context) error {
 	return errors.New("immediate failure to trigger halt")
 }
 
-func (w *slowHaltWorker) Halt(ctx context.Context) error {
+func (w *slowHaltWorker) Halt(_ context.Context) error {
 	*w.startTime = time.Now()
 	// Simulate 100ms of cleanup work
 	time.Sleep(100 * time.Millisecond)
@@ -251,31 +259,60 @@ type countingHaltWorker struct {
 	haltMutex *sync.Mutex
 }
 
-func (w *countingHaltWorker) Run(ctx context.Context) error {
+func (w *countingHaltWorker) Run(_ context.Context) error {
 	return errors.New("immediate failure to trigger halt")
 }
 
-func (w *countingHaltWorker) Halt(ctx context.Context) error {
+func (w *countingHaltWorker) Halt(_ context.Context) error {
 	w.haltMutex.Lock()
 	*w.haltCount++
 	w.haltMutex.Unlock()
 	return nil
 }
 
-type failingHaltWorker struct {
+// regressionWorker always fails Run() with errSentinelRun.
+// Its Halt() returns the configured haltErr, allowing tests to verify
+// that both run and halt errors are collected.
+type regressionWorker struct {
 	mockWorker
-	shouldFail bool
+	haltErr error
 }
 
-func (w *failingHaltWorker) Run(ctx context.Context) error {
-	return errors.New("run failure")
+func (w *regressionWorker) Run(_ context.Context) error {
+	return errSentinelRun
 }
 
-func (w *failingHaltWorker) Halt(ctx context.Context) error {
-	if w.shouldFail {
-		return errors.New("halt failure")
-	}
+func (w *regressionWorker) Halt(_ context.Context) error {
+	return w.haltErr
+}
+
+// cleanWorker exits cleanly: Run() returns nil immediately.
+// Used to verify that Start() does not hang when all workers finish normally.
+type cleanWorker struct {
+	mockWorker
+}
+
+func (w *cleanWorker) Run(_ context.Context) error {
 	return nil
+}
+
+func (w *cleanWorker) Halt(_ context.Context) error {
+	return nil
+}
+
+// hangingHaltWorker returns an error from Run (to trigger halt)
+// and blocks in Halt until the context is done.
+type hangingHaltWorker struct {
+	mockWorker
+}
+
+func (w *hangingHaltWorker) Run(_ context.Context) error {
+	return errSentinelRun
+}
+
+func (w *hangingHaltWorker) Halt(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 type signalAwareWorker struct {
@@ -409,24 +446,37 @@ func TestHaltContext(t *testing.T) {
 	t.Run("halt errors collected and returned", func(t *testing.T) {
 		t.Parallel()
 
+		// Regression test for Bug 1: Halt errors were silently swallowed.
+		// Before the fix, haltErrC was written to but never fully drained,
+		// so Halt() errors did not appear in Start()'s return value.
+		// This test verifies both the run error AND the halt error are present
+		// in the joined error using errors.Is.
+
 		workers := []flex.Worker{
-			&failingHaltWorker{
+			&regressionWorker{
 				mockWorker: mockWorker{t: t, name: "worker-1"},
-				shouldFail: false,
+				haltErr:    nil, // clean halt
 			},
-			&failingHaltWorker{
+			&regressionWorker{
 				mockWorker: mockWorker{t: t, name: "worker-2"},
-				shouldFail: true,
+				haltErr:    errSentinelHalt, // failing halt
 			},
 		}
 
 		err := flex.Start(t.Context(), workers...)
 		if err == nil {
-			t.Error("expected errors")
+			t.Fatal("expected errors, got nil")
 		}
 
-		// Should contain errors
-		t.Logf("error returned (correct): %v", err)
+		// Verify the halt error was collected and returned (the core fix for Bug 1)
+		if !errors.Is(err, errSentinelHalt) {
+			t.Errorf("halt error %q not found in returned error: %v", errSentinelHalt, err)
+		}
+
+		// Bonus: verify the run error is also present
+		if !errors.Is(err, errSentinelRun) {
+			t.Errorf("run error %q not found in returned error: %v", errSentinelRun, err)
+		}
 	})
 
 	t.Run("halt context independent of run context cancellation", func(t *testing.T) {
@@ -434,7 +484,7 @@ func TestHaltContext(t *testing.T) {
 
 		haltContextNotCanceled := false
 
-		// CreateUse a short timeout context to force cancellation
+		// Create a short timeout context to force cancellation
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 
@@ -449,4 +499,108 @@ func TestHaltContext(t *testing.T) {
 			t.Error("expected Halt to receive fresh (non-canceled) context even after Run context cancellation")
 		}
 	})
+}
+
+// TestCleanExitDoesNotHang is a regression test for Bug 2.
+//
+// Before the fix, if all workers' Run() returned nil (clean exit),
+// nothing was written to runErrC and ctx.Done() was never triggered,
+// causing Start() to block forever.
+//
+// This test runs inside a synctest bubble. If the bug regresses and
+// Start() blocks, the synctest runtime detects a deadlock and panics
+// the test — no real timeout needed.
+func TestCleanExitDoesNotHang(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		worker := &cleanWorker{
+			mockWorker: mockWorker{t: t, name: "clean-exit"},
+		}
+
+		err := flex.StartOpts(t.Context(), []flex.Worker{worker}, flex.WithoutSignals())
+		if err != nil {
+			t.Errorf("expected nil error for clean exit, got: %v", err)
+		}
+	})
+}
+
+// TestHaltTimeoutEnforced verifies that when a worker's Halt() blocks,
+// the DefaultHaltTimeout is enforced and the resulting context.DeadlineExceeded
+// error is returned.
+//
+// Runs inside a synctest bubble so the 30-second halt timeout completes
+// in virtual time (instantly in real time).
+func TestHaltTimeoutEnforced(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		worker := &hangingHaltWorker{
+			mockWorker: mockWorker{t: t, name: "hanging-halt"},
+		}
+
+		// Cancel immediately to trigger halt phase
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		err := flex.StartOpts(ctx, []flex.Worker{worker}, flex.WithoutSignals())
+		if err == nil {
+			t.Fatal("expected error from halted worker, got nil")
+		}
+
+		// The Halt() should have returned context.DeadlineExceeded
+		// because DefaultHaltTimeout (30s, virtual) expired.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("expected DeadlineExceeded in errors, got: %v", err)
+		}
+
+		// The run error should also be present
+		if !errors.Is(err, errSentinelRun) {
+			t.Errorf("expected run error %q, got: %v", errSentinelRun, err)
+		}
+	})
+}
+
+// TestHaltErrorsFromAllWorkers is a regression test for Bug 1 (thorough variant):
+// Before the fix, haltErrC was closed before all halt goroutines completed,
+// so Halt() errors could be lost. This test uses 3 workers, each returning
+// a distinct halt error, and asserts that ALL three appear in the joined error.
+func TestHaltErrorsFromAllWorkers(t *testing.T) {
+	t.Parallel()
+
+	haltErrA := errors.New("halt error A")
+	haltErrB := errors.New("halt error B")
+	haltErrC := errors.New("halt error C")
+
+	workers := []flex.Worker{
+		&regressionWorker{
+			mockWorker: mockWorker{t: t, name: "worker-A"},
+			haltErr:    haltErrA,
+		},
+		&regressionWorker{
+			mockWorker: mockWorker{t: t, name: "worker-B"},
+			haltErr:    haltErrB,
+		},
+		&regressionWorker{
+			mockWorker: mockWorker{t: t, name: "worker-C"},
+			haltErr:    haltErrC,
+		},
+	}
+
+	err := flex.Start(t.Context(), workers...)
+	if err == nil {
+		t.Fatal("expected errors, got nil")
+	}
+
+	// All three distinct halt errors must be present
+	if !errors.Is(err, haltErrA) {
+		t.Errorf("halt error A %q not found in: %v", haltErrA, err)
+	}
+	if !errors.Is(err, haltErrB) {
+		t.Errorf("halt error B %q not found in: %v", haltErrB, err)
+	}
+	if !errors.Is(err, haltErrC) {
+		t.Errorf("halt error C %q not found in: %v", haltErrC, err)
+	}
+
+	// The run error should also be present (all regressionWorkers fail Run)
+	if !errors.Is(err, errSentinelRun) {
+		t.Errorf("run error %q not found in: %v", errSentinelRun, err)
+	}
 }
